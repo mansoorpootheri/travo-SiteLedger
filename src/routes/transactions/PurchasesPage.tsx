@@ -13,7 +13,7 @@ import { useAppUser } from "@/routes/guards";
 import { useSiteSelection } from "@/lib/site-context";
 import { Role, TransactionStatus, type Purchase, type Item, type Vendor, type Unit } from "@/lib/types";
 
-const EMPTY_ROW = { vendorId: "", itemId: "", qty: "", amount: "", narration: "" };
+const EMPTY_ROW = { vendorId: "", itemId: "", vendorInvoiceNo: "", qty: "", amount: "", narration: "" };
 
 export default function PurchasesPage() {
   const { user } = useAppUser();
@@ -91,6 +91,7 @@ export default function PurchasesPage() {
       },
       width: "200px",
     },
+    { key: "vendorInvoiceNo", label: "Vendor Invoice No", type: "text", width: "140px" },
     { key: "qty", label: "Qty", type: "number", summable: true, width: "70px" },
     { key: "amount", label: "Amount", type: "number", summable: true },
     { key: "narration", label: "Narration", type: "text" },
@@ -109,6 +110,7 @@ export default function PurchasesPage() {
     cells: {
       vendorId: purchase.vendor?.name,
       itemId: purchase.item?.name,
+      vendorInvoiceNo: purchase.vendorInvoiceNo,
       qty: purchase.qty,
       amount: Number(purchase.amount).toFixed(2),
       narration: purchase.narration,
@@ -145,6 +147,7 @@ export default function PurchasesPage() {
           rowEditor.startEdit(purchase.id, {
             vendorId: purchase.vendorId,
             itemId: purchase.itemId,
+            vendorInvoiceNo: purchase.vendorInvoiceNo ?? "",
             qty: purchase.qty,
             amount: purchase.amount,
             narration: purchase.narration ?? "",

@@ -1,12 +1,22 @@
 import { dotnetRequest } from "./dotnet-api";
 
-// Phase 1 scope: master data only (Sites, GL Accounts, Customers, Vendors,
-// Items, Units) wired to the real EnterpriseBase API. Transactions
-// (Sales/Purchases/Vouchers/Journal Vouchers) and Reports are a follow-up
-// phase — their routes still exist in App.tsx but have no handler here, so
-// visiting them will surface a clear "No .NET handler" error instead of
-// silently hitting the old (dead) Node backend.
-const DOTNET_RESOURCES = ["/sites", "/units", "/items", "/gl-accounts", "/customers", "/vendors"];
+// Phase 1: master data (Sites, GL Accounts, Customers, Vendors, Items,
+// Units). Phase 2 (this batch): Sales/Purchases. Vouchers/Journal Vouchers
+// and Reports are still a follow-up — their routes exist in App.tsx but
+// have no handler here, so visiting them surfaces a clear "No .NET
+// handler" error instead of silently hitting the old (dead) Node backend.
+const DOTNET_RESOURCES = [
+  "/sites",
+  "/units",
+  "/items",
+  "/gl-accounts",
+  "/customers",
+  "/vendors",
+  "/sales",
+  "/purchases",
+  "/vouchers",
+  "/journal-vouchers",
+];
 
 export function isDotnetResource(path: string): boolean {
   const bare = path.split("?")[0];
@@ -107,13 +117,26 @@ interface DotnetAccountMasterDto {
   openingBalance: number;
 }
 
+// Real backend's AccountGroupType (Core/Accounting/AccountGroup.cs):
+// Asset=1, Liability=2, Income=3, Expense=4, Capital=5 — translated onto
+// the legacy string GLAccountType union (lib/types.ts) that
+// GL_ACCOUNT_TYPE_LABELS and every Phase 2 page keying off `.type` expect
+// (Capital -> "EQUITY", the closest existing label).
+const GL_TYPE_FROM_NUMBER: Record<number, string> = {
+  1: "ASSET",
+  2: "LIABILITY",
+  3: "INCOME",
+  4: "EXPENSE",
+  5: "EQUITY",
+};
+
 function reshapeAccountMaster(dto: DotnetAccountMasterDto) {
   return withIsActive({
     id: dto.id,
     name: dto.accountName,
     headerId: dto.headerId,
     headerName: dto.headerName,
-    type: dto.type,
+    type: GL_TYPE_FROM_NUMBER[dto.type] ?? "ASSET",
     openingBalance: dto.openingBalance,
   });
 }
@@ -254,6 +277,331 @@ function simpleNewMasterData(serviceName: string, resourcePrefix: string) {
 const handleItems = simpleNewMasterData("Item", "/items");
 const handleUnits = simpleNewMasterData("Unit", "/units");
 
+// --- Sales / Purchases (new, batch-entry + GL-mapping + approve/reject) ----
+// SaleAppService/PurchaseAppService return a flattened master+single-line
+// DTO already shaped close to what the pages expect (see
+// API/src/EnterpriseBase.Application/Sales/Dto/SaleDto.cs) — reshape here
+// only nests the *Name fields into the {id,name} objects the pages read
+// (sale.customer?.name, sale.item?.name, sale.gl1?.name/gl2?.name) and maps
+// the numeric Status enum (Pending=1/Approved=2/Rejected=3) onto the
+// frontend's string TransactionStatus.
+
+const STATUS_FROM_NUMBER: Record<number, string> = { 1: "PENDING", 2: "APPROVED", 3: "REJECTED" };
+
+// BatchGrid's Row type is Record<string,string> — every field the UI
+// collects (qty, amount, bankAmount, cashAmount, ...) is a string, even
+// though the real DTOs are decimal/int. System.Text.Json's default (strict)
+// body deserialization rejects a JSON string for a numeric property, so
+// every numeric field has to be coerced to an actual number before crossing
+// the wire — same reasoning as the siteId coercion below.
+function coerceNumbers<T extends Record<string, unknown>>(row: T, fields: string[]): T {
+  const out = { ...row };
+  for (const f of fields) {
+    if (out[f] !== undefined && out[f] !== null && out[f] !== "") {
+      (out as Record<string, unknown>)[f] = Number(out[f]);
+    }
+  }
+  return out;
+}
+
+interface DotnetTxnDto {
+  id: string;
+  siteId: number;
+  date: string;
+  qty: number;
+  amount: number;
+  narration: string | null;
+  gl1Id: string | null;
+  gl1Name: string | null;
+  gl2Id: string | null;
+  gl2Name: string | null;
+  status: number;
+  approvedById: string | null;
+  approvedAt: string | null;
+  [key: string]: unknown;
+}
+
+function reshapeTxn(
+  dto: DotnetTxnDto,
+  partyKey: "customer" | "vendor",
+  partyIdKey: "customerId" | "vendorId",
+  partyNameKey: "customerName" | "vendorName",
+) {
+  const { gl1Name, gl2Name, itemName, [partyNameKey]: partyName, ...rest } = dto as DotnetTxnDto & {
+    itemName: string | null;
+  };
+  return {
+    ...rest,
+    siteId: String(dto.siteId),
+    status: STATUS_FROM_NUMBER[dto.status] ?? "PENDING",
+    [partyKey]: { id: dto[partyIdKey], name: partyName },
+    item: { id: dto.itemId, name: itemName },
+    gl1: dto.gl1Id ? { id: dto.gl1Id, name: gl1Name } : null,
+    gl2: dto.gl2Id ? { id: dto.gl2Id, name: gl2Name } : null,
+  };
+}
+
+// ABP's dynamic-API verb-by-name-prefix convention: Create*/MapGL/Approve/
+// Reject (no recognized prefix) -> POST, Update* -> PUT, Get* -> GET,
+// Delete* -> DELETE — same rule already relied on throughout this file.
+function transactionResource(
+  serviceName: string,
+  resourcePrefix: string,
+  partyKey: "customer" | "vendor",
+  partyIdKey: "customerId" | "vendorId",
+  partyNameKey: "customerName" | "vendorName",
+  numericFields: string[] = ["qty", "amount"],
+) {
+  const reshape = (dto: DotnetTxnDto) => reshapeTxn(dto, partyKey, partyIdKey, partyNameKey);
+
+  return async <T,>(method: string, path: string, body: unknown): Promise<T> => {
+    const [bare, query] = path.split("?");
+    const tail = bare === resourcePrefix ? "" : bare.slice(resourcePrefix.length + 1);
+
+    if (method === "GET" && tail === "") {
+      const params = new URLSearchParams(query ?? "");
+      const result = await dotnetRequest<DotnetTxnDto[]>(
+        `/services/app/${serviceName}/GetAll?SiteId=${params.get("siteId")}&Date=${params.get("date")}`,
+      );
+      return result.map(reshape) as T;
+    }
+    if (method === "POST" && tail === "batch") {
+      // siteId arrives as a string (site-context.tsx stores it that way);
+      // the real DTO's SiteId is a C# int — System.Text.Json's default
+      // (strict) body deserialization rejects a JSON string for an int
+      // property, so it's coerced to a number here before crossing the wire.
+      const rows = (body as Array<Record<string, unknown>>).map((row) =>
+        coerceNumbers({ ...row, siteId: Number(row.siteId) }, numericFields),
+      );
+      return dotnetRequest<T>(`/services/app/${serviceName}/CreateBatch`, { method: "POST", body: JSON.stringify(rows) });
+    }
+    if (method === "PATCH" && tail === "gl-mapping") {
+      return dotnetRequest<T>(`/services/app/${serviceName}/MapGL`, { method: "POST", body: JSON.stringify(body) });
+    }
+    if (method === "POST" && tail === "approve") {
+      return dotnetRequest<T>(`/services/app/${serviceName}/Approve`, { method: "POST", body: JSON.stringify(body) });
+    }
+    if (method === "POST" && tail === "reject") {
+      return dotnetRequest<T>(`/services/app/${serviceName}/Reject`, { method: "POST", body: JSON.stringify(body) });
+    }
+    if (method === "PATCH" && tail && !["batch", "gl-mapping", "approve", "reject"].includes(tail)) {
+      const result = await dotnetRequest<DotnetTxnDto>(`/services/app/${serviceName}/Update`, {
+        method: "PUT",
+        body: JSON.stringify(coerceNumbers({ ...(body as object), id: tail }, numericFields)),
+      });
+      return reshape(result) as T;
+    }
+    if (method === "DELETE" && tail) {
+      return dotnetRequest<T>(`/services/app/${serviceName}/Delete?Id=${tail}`, { method: "DELETE" });
+    }
+
+    throw new Error(`No .NET route for ${method} ${path}`);
+  };
+}
+
+const handleSales = transactionResource("Sale", "/sales", "customer", "customerId", "customerName");
+const handlePurchases = transactionResource("Purchase", "/purchases", "vendor", "vendorId", "vendorName");
+
+// --- Vouchers (new, cash/bank movement — no party/item, no master/detail) -
+// VoucherAppService's DTO is already close to flat (see
+// API/src/EnterpriseBase.Application/SiteVouchers/Dto/VoucherDto.cs); this
+// reshape nests gl1/gl2 the same way Sales/Purchases do, maps the numeric
+// Type enum (Payment=1/Receipt=2) onto the frontend's string VoucherType,
+// and always reports linkedTransactionType/linkedTransactionId as null — a
+// removed legacy feature (see useGlApproval.ts's "Path C" comment) nothing
+// here will ever populate, matching VouchersPage.tsx's existing
+// `!v.linkedTransactionId` filter.
+
+const VOUCHER_TYPE_TO_NUMBER: Record<string, number> = { PAYMENT: 1, RECEIPT: 2 };
+const VOUCHER_TYPE_FROM_NUMBER: Record<number, string> = { 1: "PAYMENT", 2: "RECEIPT" };
+
+interface DotnetVoucherDto {
+  id: string;
+  siteId: number;
+  particulars: string;
+  bankAmount: number | null;
+  cashAmount: number | null;
+  type: number;
+  gl1Id: string | null;
+  gl1Name: string | null;
+  gl2Id: string | null;
+  gl2Name: string | null;
+  status: number;
+  [key: string]: unknown;
+}
+
+function reshapeVoucher(dto: DotnetVoucherDto) {
+  const { gl1Name, gl2Name, ...rest } = dto;
+  return {
+    ...rest,
+    siteId: String(dto.siteId),
+    type: VOUCHER_TYPE_FROM_NUMBER[dto.type] ?? "PAYMENT",
+    status: STATUS_FROM_NUMBER[dto.status] ?? "PENDING",
+    gl1: dto.gl1Id ? { id: dto.gl1Id, name: gl1Name } : null,
+    gl2: dto.gl2Id ? { id: dto.gl2Id, name: gl2Name } : null,
+    linkedTransactionType: null,
+    linkedTransactionId: null,
+  };
+}
+
+function voucherTypeToNumber(body: Record<string, unknown>) {
+  return { ...body, type: VOUCHER_TYPE_TO_NUMBER[body.type as string] ?? 1 };
+}
+
+async function handleVouchers<T>(method: string, path: string, body: unknown): Promise<T> {
+  const [bare, query] = path.split("?");
+  const tail = bare === "/vouchers" ? "" : bare.slice("/vouchers".length + 1);
+
+  if (method === "GET" && tail === "") {
+    const params = new URLSearchParams(query ?? "");
+    const result = await dotnetRequest<DotnetVoucherDto[]>(
+      `/services/app/Voucher/GetAll?SiteId=${params.get("siteId")}&Date=${params.get("date")}`,
+    );
+    return result.map(reshapeVoucher) as T;
+  }
+  if (method === "POST" && tail === "batch") {
+    const rows = (body as Array<Record<string, unknown>>).map((row) =>
+      coerceNumbers(voucherTypeToNumber({ ...row, siteId: Number(row.siteId) }), ["bankAmount", "cashAmount"]),
+    );
+    return dotnetRequest<T>("/services/app/Voucher/CreateBatch", { method: "POST", body: JSON.stringify(rows) });
+  }
+  if (method === "PATCH" && tail === "gl-mapping") {
+    return dotnetRequest<T>("/services/app/Voucher/MapGL", { method: "POST", body: JSON.stringify(body) });
+  }
+  if (method === "POST" && tail === "approve") {
+    return dotnetRequest<T>("/services/app/Voucher/Approve", { method: "POST", body: JSON.stringify(body) });
+  }
+  if (method === "POST" && tail === "reject") {
+    return dotnetRequest<T>("/services/app/Voucher/Reject", { method: "POST", body: JSON.stringify(body) });
+  }
+  if (method === "PATCH" && tail && !["batch", "gl-mapping", "approve", "reject"].includes(tail)) {
+    const input = coerceNumbers(voucherTypeToNumber({ ...(body as Record<string, unknown>), id: tail }), ["bankAmount", "cashAmount"]);
+    const result = await dotnetRequest<DotnetVoucherDto>("/services/app/Voucher/Update", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+    return reshapeVoucher(result) as T;
+  }
+  if (method === "DELETE" && tail) {
+    return dotnetRequest<T>(`/services/app/Voucher/Delete?Id=${tail}`, { method: "DELETE" });
+  }
+
+  throw new Error(`No .NET route for ${method} ${path}`);
+}
+
+// --- Journal Vouchers (reuse real JournalVoucher — direct entry, no
+// approval step; see API/src/EnterpriseBase.Application/Vouchers) ---------
+// Confirmed: saving posts immediately (IsPosted=true, real ledger entries
+// written on the spot) — no Pending/Approve/Reject here at all, unlike
+// Sales/Purchases/Vouchers above. Two gaps the real DTO has that the
+// frontend form doesn't fill in itself are patched here: FinancialYearId
+// (auto-resolved once via GetActiveFinancialYear and cached) and Update's
+// required VoucherDate (carried forward from the existing record, since the
+// form only edits narration/lines on an existing entry).
+
+let cachedFinancialYearId: string | null = null;
+async function getActiveFinancialYearId(): Promise<string> {
+  if (cachedFinancialYearId) return cachedFinancialYearId;
+  const fy = await dotnetRequest<{ id: string }>("/services/app/JournalVoucher/GetActiveFinancialYear");
+  cachedFinancialYearId = fy.id;
+  return fy.id;
+}
+
+interface DotnetJournalVoucherLine {
+  accountId: string;
+  accountName: string | null;
+  debitAmount: number;
+  creditAmount: number;
+  narration: string | null;
+}
+
+interface DotnetJournalVoucherDto {
+  id: string;
+  branchId: number;
+  voucherDate: string;
+  narration: string | null;
+  isCancelled: boolean;
+  lines: DotnetJournalVoucherLine[];
+}
+
+// Frontend lines are {glAccountId, debitAmount, creditAmount, narration}
+// with string (or undefined) amounts; the real CreateJournalVoucherLineDto
+// is {AccountId, DebitAmount, CreditAmount, Narration} with decimal
+// amounts — both the field rename and the string->number coercion are
+// required, or AccountId silently defaults to Guid.Empty and
+// debit/creditAmount deserialization fails.
+function journalLinesToDotnet(lines: unknown[]) {
+  return (lines as Array<Record<string, unknown>>).map((l) => ({
+    accountId: l.glAccountId,
+    debitAmount: l.debitAmount ? Number(l.debitAmount) : 0,
+    creditAmount: l.creditAmount ? Number(l.creditAmount) : 0,
+    narration: l.narration,
+  }));
+}
+
+function reshapeJournalVoucher(dto: DotnetJournalVoucherDto) {
+  return {
+    id: dto.id,
+    siteId: String(dto.branchId),
+    date: dto.voucherDate,
+    narration: dto.narration,
+    lines: dto.lines.map((l) => ({
+      glAccountId: l.accountId,
+      debitAmount: l.debitAmount ? String(l.debitAmount) : null,
+      creditAmount: l.creditAmount ? String(l.creditAmount) : null,
+      narration: l.narration,
+    })),
+  };
+}
+
+async function handleJournalVouchers<T>(method: string, path: string, body: unknown): Promise<T> {
+  const [bare, query] = path.split("?");
+  const tail = bare === "/journal-vouchers" ? "" : bare.slice("/journal-vouchers".length + 1);
+
+  if (method === "GET" && tail === "") {
+    const params = new URLSearchParams(query ?? "");
+    const date = params.get("date");
+    const result = await dotnetRequest<{ items: DotnetJournalVoucherDto[] }>(
+      `/services/app/JournalVoucher/GetAll?FromDate=${date}&ToDate=${date}&BranchId=${params.get("siteId")}`,
+    );
+    return result.items.filter((x) => !x.isCancelled).map(reshapeJournalVoucher) as T;
+  }
+  if (method === "POST" && tail === "") {
+    const input = body as { siteId: string; date: string; narration?: string; lines: unknown[] };
+    const financialYearId = await getActiveFinancialYearId();
+    const result = await dotnetRequest<DotnetJournalVoucherDto>("/services/app/JournalVoucher/Create", {
+      method: "POST",
+      body: JSON.stringify({
+        voucherDate: input.date,
+        narration: input.narration,
+        financialYearId,
+        lines: journalLinesToDotnet(input.lines),
+      }),
+    });
+    return reshapeJournalVoucher(result) as T;
+  }
+  if (method === "PATCH" && tail) {
+    const existing = await dotnetRequest<DotnetJournalVoucherDto>(`/services/app/JournalVoucher/Get?id=${tail}`);
+    const input = body as { narration?: string; lines: unknown[] };
+    const result = await dotnetRequest<DotnetJournalVoucherDto>("/services/app/JournalVoucher/Update", {
+      method: "PUT",
+      body: JSON.stringify({
+        id: tail,
+        voucherDate: existing.voucherDate,
+        narration: input.narration,
+        lines: journalLinesToDotnet(input.lines),
+      }),
+    });
+    return reshapeJournalVoucher(result) as T;
+  }
+  if (method === "DELETE" && tail) {
+    // Soft-cancel (reverses ledger entries) — behaves like a delete from the frontend's point of view.
+    return dotnetRequest<T>(`/services/app/JournalVoucher/Delete?id=${tail}`, { method: "DELETE" });
+  }
+
+  throw new Error(`No .NET route for ${method} ${path}`);
+}
+
 // --- Dispatch --------------------------------------------------------------
 
 function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
@@ -263,6 +611,10 @@ function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
   if (matches(path, "/items")) return handleItems<T>(method, path, body);
   if (matches(path, "/customers")) return handleCustomers<T>(method, path, body);
   if (matches(path, "/vendors")) return handleVendors<T>(method, path, body);
+  if (matches(path, "/sales")) return handleSales<T>(method, path, body);
+  if (matches(path, "/purchases")) return handlePurchases<T>(method, path, body);
+  if (matches(path, "/vouchers")) return handleVouchers<T>(method, path, body);
+  if (matches(path, "/journal-vouchers")) return handleJournalVouchers<T>(method, path, body);
   throw new Error(`No .NET handler registered for ${method} ${path}`);
 }
 

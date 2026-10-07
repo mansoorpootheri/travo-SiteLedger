@@ -176,6 +176,7 @@ export interface Purchase {
   date: string;
   vendorId: string;
   vendor?: Vendor;
+  vendorInvoiceNo: string | null;
   itemId: string;
   item?: Item;
   qty: string;
@@ -237,14 +238,14 @@ export interface JournalVoucherLine {
   narration: string | null;
 }
 
+// No status/approvedBy/approvedAt — direct entry, no approval step (the
+// real backend posts it immediately; see dotnet-shim.ts's
+// handleJournalVouchers and JournalVouchersPage.tsx).
 export interface JournalVoucher {
   id: string;
   siteId: string;
   date: string;
   narration: string | null;
-  status: TransactionStatus;
-  approvedById: string | null;
-  approvedAt: string | null;
   lines: JournalVoucherLine[];
 }
 
