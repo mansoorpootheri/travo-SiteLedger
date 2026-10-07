@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { getSaleEmployees } from "@/lib/dotnet-shim";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
@@ -13,7 +14,7 @@ import { useAppUser } from "@/routes/guards";
 import { useSiteSelection } from "@/lib/site-context";
 import { Role, TransactionStatus, type Sale, type Item, type Customer, type Unit } from "@/lib/types";
 
-const EMPTY_ROW = { customerId: "", itemId: "", qty: "", amount: "", narration: "" };
+const EMPTY_ROW = { customerId: "", itemId: "", employeeId: "", qty: "", amount: "", narration: "" };
 
 export default function SalesPage() {
   const { user } = useAppUser();
@@ -29,6 +30,7 @@ export default function SalesPage() {
     queryFn: () => api.get<Customer[]>("/customers"),
   });
   const { data: units } = useQuery({ queryKey: ["master-data", "/units"], queryFn: () => api.get<Unit[]>("/units") });
+  const { data: employees } = useQuery({ queryKey: ["sale-employees"], queryFn: getSaleEmployees });
 
   // Lets the Customer combobox below create a brand-new customer inline
   // (see Combobox's `quickCreate`) instead of requiring a trip to Master
@@ -89,6 +91,13 @@ export default function SalesPage() {
       },
       width: "200px",
     },
+    {
+      key: "employeeId",
+      label: "Supervisor",
+      type: "select",
+      options: employees,
+      width: "160px",
+    },
     { key: "qty", label: "Qty", type: "number", summable: true, width: "70px" },
     { key: "amount", label: "Amount", type: "number", summable: true },
     { key: "narration", label: "Narration", type: "text" },
@@ -107,6 +116,7 @@ export default function SalesPage() {
     cells: {
       customerId: sale.customer?.name,
       itemId: sale.item?.name,
+      employeeId: sale.employeeName ?? "—",
       qty: sale.qty,
       amount: Number(sale.amount).toFixed(2),
       narration: sale.narration,
@@ -143,6 +153,7 @@ export default function SalesPage() {
           rowEditor.startEdit(sale.id, {
             customerId: sale.customerId,
             itemId: sale.itemId,
+            employeeId: sale.employeeId,
             qty: sale.qty,
             amount: sale.amount,
             narration: sale.narration ?? "",

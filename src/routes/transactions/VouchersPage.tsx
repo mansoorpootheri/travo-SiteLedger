@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { getVoucherEmployees } from "@/lib/dotnet-shim";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
@@ -13,7 +14,7 @@ import { useAppUser } from "@/routes/guards";
 import { useSiteSelection } from "@/lib/site-context";
 import { Role, TransactionStatus, VoucherType, type VoucherListResponse } from "@/lib/types";
 
-const EMPTY_ROW = { particulars: "", bankAmount: "", cashAmount: "", narration: "" };
+const EMPTY_ROW = { particulars: "", employeeId: "", bankAmount: "", cashAmount: "", narration: "" };
 
 // Receipt (money in) / Payment (money out) is no longer a separate manual
 // toggle — the sign of the typed amount is the direction: positive = Receipt,
@@ -59,6 +60,7 @@ export default function VouchersPage() {
     queryFn: () => api.get<VoucherListResponse>(`/vouchers?siteId=${siteId}&date=${date}`),
   });
   const vouchers = voucherData?.items;
+  const { data: employees } = useQuery({ queryKey: ["voucher-employees"], queryFn: getVoucherEmployees });
 
   const { rows, setRows, results, submit, clearSavedRows } = useBatchEntry<typeof EMPTY_ROW>("/vouchers", [
     "vouchers",
@@ -69,6 +71,13 @@ export default function VouchersPage() {
 
   const columns: GridColumn[] = [
     { key: "particulars", label: "Particulars", type: "text" },
+    {
+      key: "employeeId",
+      label: "Supervisor",
+      type: "select",
+      options: employees,
+      width: "160px",
+    },
     {
       key: "bankAmount",
       label: "Bank Amount",
@@ -136,6 +145,7 @@ export default function VouchersPage() {
         ...(countsTowardBalance ? { numericValues: { bankAmount: signedBank, cashAmount: signedCash } } : {}),
         cells: {
           particulars: voucher.particulars,
+          employeeId: voucher.employeeName ?? "—",
           bankAmount: <span className={amountColorForValue(String(signedBank))}>{signedBank.toFixed(2)}</span>,
           cashAmount: <span className={amountColorForValue(String(signedCash))}>{signedCash.toFixed(2)}</span>,
           narration: voucher.narration,
@@ -171,6 +181,7 @@ export default function VouchersPage() {
             onEdit={() =>
               rowEditor.startEdit(voucher.id, {
                 particulars: voucher.particulars,
+                employeeId: voucher.employeeId,
                 bankAmount: String(signedBank),
                 cashAmount: String(signedCash),
                 narration: voucher.narration ?? "",

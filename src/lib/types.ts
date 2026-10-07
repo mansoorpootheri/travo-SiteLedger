@@ -68,6 +68,19 @@ export interface Vendor {
   isActive: boolean;
 }
 
+// A narrow slice of the real Employee entity (API/src/EnterpriseBase.Core/Employees/Employee.cs)
+// — just enough to pick a branch-level Supervisor for Sales/Purchases/Vouchers. Not a general
+// Employee module (no payroll/HR fields); that already exists in the main Travo/ui app.
+export interface Supervisor {
+  id: string;
+  name: string;
+  code: string;
+  mobileNo: string | null;
+  branchId: string;
+  branchName: string | null;
+  isActive: boolean;
+}
+
 // Mirrors the `GLAccountType` enum in server/prisma/schema.prisma (see the
 // `Role` comment above for why this is a const object, not a TS `enum`).
 // NOT wired to the real backend yet — kept only so the not-yet-migrated
@@ -168,6 +181,8 @@ export interface Sale {
   narration: string | null;
   amountPaid: number;
   balanceDue: number;
+  employeeId: string;
+  employeeName: string | null;
 }
 
 export interface Purchase {
@@ -191,6 +206,8 @@ export interface Purchase {
   narration: string | null;
   amountPaid: number;
   balanceDue: number;
+  employeeId: string;
+  employeeName: string | null;
 }
 
 // Mirrors the `VoucherType` enum in server/prisma/schema.prisma (see the
@@ -226,6 +243,8 @@ export interface Voucher {
   linkedTransactionType: LinkedTransactionType | null;
   linkedTransactionId: string | null;
   narration: string | null;
+  employeeId: string;
+  employeeName: string | null;
 }
 
 export interface JournalVoucherLine {

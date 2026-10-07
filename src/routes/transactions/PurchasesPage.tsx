@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { getPurchaseEmployees } from "@/lib/dotnet-shim";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Combobox } from "@/components/ui/combobox";
@@ -13,7 +14,7 @@ import { useAppUser } from "@/routes/guards";
 import { useSiteSelection } from "@/lib/site-context";
 import { Role, TransactionStatus, type Purchase, type Item, type Vendor, type Unit } from "@/lib/types";
 
-const EMPTY_ROW = { vendorId: "", itemId: "", vendorInvoiceNo: "", qty: "", amount: "", narration: "" };
+const EMPTY_ROW = { vendorId: "", itemId: "", employeeId: "", vendorInvoiceNo: "", qty: "", amount: "", narration: "" };
 
 export default function PurchasesPage() {
   const { user } = useAppUser();
@@ -29,6 +30,7 @@ export default function PurchasesPage() {
     queryFn: () => api.get<Vendor[]>("/vendors"),
   });
   const { data: units } = useQuery({ queryKey: ["master-data", "/units"], queryFn: () => api.get<Unit[]>("/units") });
+  const { data: employees } = useQuery({ queryKey: ["purchase-employees"], queryFn: getPurchaseEmployees });
 
   // Lets the Vendor combobox below create a brand-new vendor inline (see
   // Combobox's `quickCreate`) instead of requiring a trip to Master Data
@@ -91,6 +93,13 @@ export default function PurchasesPage() {
       },
       width: "200px",
     },
+    {
+      key: "employeeId",
+      label: "Supervisor",
+      type: "select",
+      options: employees,
+      width: "160px",
+    },
     { key: "vendorInvoiceNo", label: "Vendor Invoice No", type: "text", width: "140px" },
     { key: "qty", label: "Qty", type: "number", summable: true, width: "70px" },
     { key: "amount", label: "Amount", type: "number", summable: true },
@@ -110,6 +119,7 @@ export default function PurchasesPage() {
     cells: {
       vendorId: purchase.vendor?.name,
       itemId: purchase.item?.name,
+      employeeId: purchase.employeeName ?? "—",
       vendorInvoiceNo: purchase.vendorInvoiceNo,
       qty: purchase.qty,
       amount: Number(purchase.amount).toFixed(2),
@@ -147,6 +157,7 @@ export default function PurchasesPage() {
           rowEditor.startEdit(purchase.id, {
             vendorId: purchase.vendorId,
             itemId: purchase.itemId,
+            employeeId: purchase.employeeId,
             vendorInvoiceNo: purchase.vendorInvoiceNo ?? "",
             qty: purchase.qty,
             amount: purchase.amount,

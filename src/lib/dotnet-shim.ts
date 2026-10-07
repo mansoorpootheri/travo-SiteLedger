@@ -10,6 +10,7 @@ const DOTNET_RESOURCES = [
   "/gl-accounts",
   "/customers",
   "/vendors",
+  "/supervisors",
   "/sales",
   "/purchases",
   "/vouchers",
@@ -243,6 +244,93 @@ function handleParty(partyType: 1 | 2, resourcePrefix: string) {
 const handleCustomers = handleParty(1, "/customers");
 const handleVendors = handleParty(2, "/vendors");
 
+// --- Supervisors (-> Employee, filtered to the "Supervisor" EmployeeType) --
+// A deliberately narrow slice of the real EmployeeAppService, just enough to
+// create/list/retire the Supervisor-type employees that Sales/Purchases/
+// Vouchers reference (see getSaleEmployees et al. below) — not a general
+// Employee module (no payroll/HR fields); that already exists in the main
+// Travo/ui app. CreateOrEdit is an upsert that expects the *whole*
+// CreateEmployeeEditDto, but this page's form only collects name/code/
+// mobile/branch, so every write (including the plain {isActive} toggle)
+// first fetches the current full DTO via GetEmployeeForEdit and merges in
+// just the changed fields before calling CreateOrEdit.
+
+let cachedSupervisorTypeId: string | null = null;
+async function getSupervisorTypeId(): Promise<string> {
+  if (cachedSupervisorTypeId) return cachedSupervisorTypeId;
+  const types = await dotnetRequest<{ value: string; displayText: string }[]>("/services/app/Employee/GetEmployeeTypesForCombobox");
+  const supervisor = types.find((t) => t.displayText === "Supervisor");
+  if (!supervisor) throw new Error('No "Supervisor" employee type is configured for this tenant.');
+  cachedSupervisorTypeId = supervisor.value;
+  return supervisor.value;
+}
+
+interface DotnetEmployeeDto {
+  id: number;
+  name: string;
+  code: string;
+  mobileNo: string | null;
+  branchId: number;
+  status: boolean;
+  [key: string]: unknown;
+}
+
+function reshapeSupervisor(employee: DotnetEmployeeDto, branchName: string | null) {
+  return {
+    id: String(employee.id),
+    name: employee.name,
+    code: employee.code,
+    mobileNo: employee.mobileNo,
+    branchId: String(employee.branchId),
+    branchName,
+    isActive: employee.status,
+  };
+}
+
+async function handleSupervisors<T>(method: string, path: string, body: unknown): Promise<T> {
+  const id = idFromPath(path, "/supervisors");
+
+  if (method === "GET" && !id) {
+    const supervisorTypeId = await getSupervisorTypeId();
+    const result = await dotnetRequest<{ items: { employee: DotnetEmployeeDto; branchName: string | null }[] }>(
+      `/services/app/Employee/GetAll?EmployeeTypeId=${supervisorTypeId}&MaxResultCount=1000`,
+    );
+    return result.items.map((x) => reshapeSupervisor(x.employee, x.branchName)) as T;
+  }
+  if (method === "POST" && !id) {
+    const input = body as Record<string, unknown>;
+    const supervisorTypeId = await getSupervisorTypeId();
+    await dotnetRequest<void>("/services/app/Employee/CreateOrEdit", {
+      method: "POST",
+      body: JSON.stringify({
+        id: 0,
+        name: input.name,
+        code: input.code,
+        mobileNo: input.mobileNo,
+        branchId: Number(input.branchId),
+        employeeTypeId: Number(supervisorTypeId),
+        joiningDate: new Date().toISOString(),
+        status: true,
+      }),
+    });
+    return {} as T;
+  }
+  if (method === "PATCH" && id) {
+    const current = await dotnetRequest<{ employee: Record<string, unknown>; branchName: string | null }>(
+      `/services/app/Employee/GetEmployeeForEdit?Id=${id}`,
+    );
+    const changes: Record<string, unknown> = isPureActiveToggle(body)
+      ? { status: (body as { isActive: boolean }).isActive }
+      : (body as Record<string, unknown>);
+    const merged: Record<string, unknown> = { ...current.employee, ...changes, id: Number(id) };
+    if ("branchId" in changes) merged.branchId = Number(changes.branchId);
+    await dotnetRequest<void>("/services/app/Employee/CreateOrEdit", { method: "POST", body: JSON.stringify(merged) });
+    return reshapeSupervisor(merged as unknown as DotnetEmployeeDto, current.branchName) as T;
+  }
+
+  throw new Error(`No .NET route for ${method} ${path}`);
+}
+
 // --- Items / Units (new, built to match the UI 1:1) ----------------------
 // No reshaping needed — IItemAppService/IUnitAppService were designed
 // against SiteLedger's exact field names.
@@ -399,8 +487,21 @@ function transactionResource(
   };
 }
 
-const handleSales = transactionResource("Sale", "/sales", "customer", "customerId", "customerName");
-const handlePurchases = transactionResource("Purchase", "/purchases", "vendor", "vendorId", "vendorName");
+const handleSales = transactionResource("Sale", "/sales", "customer", "customerId", "customerName", ["qty", "amount", "employeeId"]);
+const handlePurchases = transactionResource("Purchase", "/purchases", "vendor", "vendorId", "vendorName", ["qty", "amount", "employeeId"]);
+
+// Supervisor-filtered employee options for the Sale/Purchase/Voucher batch
+// grids — each AppService exposes its own GetEmployees combobox endpoint
+// (Pages_X-authorized, same pattern as getAccountHeaders() above) rather
+// than sharing one global endpoint, matching this file's existing
+// per-resource convention.
+async function getEmployeeOptions(serviceName: "Sale" | "Purchase" | "Voucher") {
+  const employees = await dotnetRequest<{ value: string; displayText: string }[]>(`/services/app/${serviceName}/GetEmployees`);
+  return employees.map((e) => ({ value: e.value, label: e.displayText }));
+}
+export const getSaleEmployees = () => getEmployeeOptions("Sale");
+export const getPurchaseEmployees = () => getEmployeeOptions("Purchase");
+export const getVoucherEmployees = () => getEmployeeOptions("Voucher");
 
 // --- Vouchers (new, cash/bank movement — no party/item, no master/detail) -
 // VoucherAppService's DTO is already close to flat (see
@@ -467,7 +568,7 @@ async function handleVouchers<T>(method: string, path: string, body: unknown): P
   }
   if (method === "POST" && tail === "batch") {
     const rows = (body as Array<Record<string, unknown>>).map((row) =>
-      coerceNumbers(voucherTypeToNumber({ ...row, siteId: Number(row.siteId) }), ["bankAmount", "cashAmount"]),
+      coerceNumbers(voucherTypeToNumber({ ...row, siteId: Number(row.siteId) }), ["bankAmount", "cashAmount", "employeeId"]),
     );
     return dotnetRequest<T>("/services/app/Voucher/CreateBatch", { method: "POST", body: JSON.stringify(rows) });
   }
@@ -481,7 +582,7 @@ async function handleVouchers<T>(method: string, path: string, body: unknown): P
     return dotnetRequest<T>("/services/app/Voucher/Reject", { method: "POST", body: JSON.stringify(body) });
   }
   if (method === "PATCH" && tail && !["batch", "gl-mapping", "approve", "reject"].includes(tail)) {
-    const input = coerceNumbers(voucherTypeToNumber({ ...(body as Record<string, unknown>), id: tail }), ["bankAmount", "cashAmount"]);
+    const input = coerceNumbers(voucherTypeToNumber({ ...(body as Record<string, unknown>), id: tail }), ["bankAmount", "cashAmount", "employeeId"]);
     const result = await dotnetRequest<DotnetVoucherDto>("/services/app/Voucher/Update", {
       method: "PUT",
       body: JSON.stringify(input),
@@ -861,6 +962,7 @@ function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
   if (matches(path, "/items")) return handleItems<T>(method, path, body);
   if (matches(path, "/customers")) return handleCustomers<T>(method, path, body);
   if (matches(path, "/vendors")) return handleVendors<T>(method, path, body);
+  if (matches(path, "/supervisors")) return handleSupervisors<T>(method, path, body);
   if (matches(path, "/sales")) return handleSales<T>(method, path, body);
   if (matches(path, "/purchases")) return handlePurchases<T>(method, path, body);
   if (matches(path, "/vouchers")) return handleVouchers<T>(method, path, body);

@@ -8,6 +8,7 @@ const TABS = [
   { to: "/master-data/gl-accounts", label: "GL Accounts" },
   { to: "/master-data/customers", label: "Customers" },
   { to: "/master-data/vendors", label: "Vendors" },
+  { to: "/master-data/supervisors", label: "Supervisors" },
 ];
 
 export default function MasterDataLayout() {

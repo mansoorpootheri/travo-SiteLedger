@@ -16,6 +16,7 @@ import ItemsPage from "@/routes/masterData/ItemsPage";
 import GLAccountsPage from "@/routes/masterData/GLAccountsPage";
 import CustomersPage from "@/routes/masterData/CustomersPage";
 import VendorsPage from "@/routes/masterData/VendorsPage";
+import SupervisorsPage from "@/routes/masterData/SupervisorsPage";
 import ReportsLayout from "@/routes/reports/ReportsLayout";
 import SalesRegisterPage from "@/routes/reports/SalesRegisterPage";
 import PurchaseRegisterPage from "@/routes/reports/PurchaseRegisterPage";
@@ -121,6 +122,7 @@ export default function App() {
           <Route path="gl-accounts" element={<GLAccountsPage />} />
           <Route path="customers" element={<CustomersPage />} />
           <Route path="vendors" element={<VendorsPage />} />
+          <Route path="supervisors" element={<SupervisorsPage />} />
         </Route>
 
         <Route
