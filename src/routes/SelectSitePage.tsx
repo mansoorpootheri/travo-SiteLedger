@@ -26,7 +26,7 @@ export default function SelectSitePage() {
   function handleNext() {
     setSelection(siteId, date);
     const from = (location.state as { from?: Location })?.from;
-    navigate(from?.pathname ?? "/daybook", { replace: true });
+    navigate(from?.pathname ?? "/vouchers", { replace: true });
   }
 
   return (

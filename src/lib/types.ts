@@ -256,16 +256,17 @@ export interface BatchRowResult {
   error?: string;
 }
 
-export interface DaybookLedger {
-  openingBalance: number;
-  receipts: number;
-  payments: number;
-  closingBalance: number;
+export interface BankCashAmount {
+  bank: number;
+  cash: number;
 }
 
-export interface DaybookResponse {
-  siteId: string;
-  date: string;
-  bank: DaybookLedger;
-  cash: DaybookLedger;
+// Opening/closing balance for the Vouchers batch-entry page — plain signed
+// sums over the Voucher table itself (see dotnet-shim.ts's handleVouchers),
+// not a posted-ledger balance. Folded into the vouchers list response
+// instead of a separate /daybook endpoint.
+export interface VoucherListResponse {
+  items: Voucher[];
+  openingBalance: BankCashAmount;
+  closingBalance: BankCashAmount;
 }

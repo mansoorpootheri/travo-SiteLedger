@@ -1,10 +1,8 @@
 import { dotnetRequest } from "./dotnet-api";
 
 // Phase 1: master data (Sites, GL Accounts, Customers, Vendors, Items,
-// Units). Phase 2 (this batch): Sales/Purchases. Vouchers/Journal Vouchers
-// and Reports are still a follow-up — their routes exist in App.tsx but
-// have no handler here, so visiting them surfaces a clear "No .NET
-// handler" error instead of silently hitting the old (dead) Node backend.
+// Units). Phase 2: Sales/Purchases/Vouchers/Journal Vouchers. Phase 4:
+// Reports. Every route in App.tsx now has a handler here.
 const DOTNET_RESOURCES = [
   "/sites",
   "/units",
@@ -17,6 +15,7 @@ const DOTNET_RESOURCES = [
   "/vouchers",
   "/journal-vouchers",
   "/users",
+  "/reports",
 ];
 
 export function isDotnetResource(path: string): boolean {
@@ -455,10 +454,16 @@ async function handleVouchers<T>(method: string, path: string, body: unknown): P
 
   if (method === "GET" && tail === "") {
     const params = new URLSearchParams(query ?? "");
-    const result = await dotnetRequest<DotnetVoucherDto[]>(
-      `/services/app/Voucher/GetAll?SiteId=${params.get("siteId")}&Date=${params.get("date")}`,
-    );
-    return result.map(reshapeVoucher) as T;
+    const result = await dotnetRequest<{
+      items: DotnetVoucherDto[];
+      openingBalance: { bank: number; cash: number };
+      closingBalance: { bank: number; cash: number };
+    }>(`/services/app/Voucher/GetAll?SiteId=${params.get("siteId")}&Date=${params.get("date")}`);
+    return {
+      items: result.items.map(reshapeVoucher),
+      openingBalance: result.openingBalance,
+      closingBalance: result.closingBalance,
+    } as T;
   }
   if (method === "POST" && tail === "batch") {
     const rows = (body as Array<Record<string, unknown>>).map((row) =>
@@ -692,6 +697,161 @@ async function handleUsers<T>(method: string, path: string, body: unknown): Prom
   throw new Error(`No .NET route for ${method} ${path}`);
 }
 
+// --- Reports (read-only) -------------------------------------------------
+// Backed by SiteLedgerReportAppService (API/src/EnterpriseBase.Application/
+// SiteLedgerReports) — Trial Balance/P&L/Account Ledger delegate server-side
+// to the real travel-agency TrialBalance/ProfitLoss/Ledger AppServices
+// (which already operate purely on AccountLedgerEntry/AccountGroup); Balance
+// Sheet, Sales/Purchases Register, G/L Summary, Balance Trend and
+// Outstanding are custom (see that file's comments for why each one is or
+// isn't delegated — in particular Balance Sheet is deliberately NOT
+// delegated: the frontend computes its own "Profit & Loss A/c" plug by
+// fetching /reports/profit-and-loss separately, so the backend must return
+// raw, unplugged Asset/Liability/Equity balances with Liability and Equity
+// kept as distinct accountType buckets).
+
+interface DotnetStatementRow {
+  accountId: string;
+  accountName: string;
+  accountType: number;
+  accountGroup: string | null;
+  net: number;
+}
+
+// accountGroup is always null from the backend (see SiteLedgerReportAppService
+// comments — it maps to a fixed legacy GLAccountGroup enum the real dynamic
+// GL header list can't be losslessly translated into), so it round-trips
+// as-is; only accountType needs the number->string translation already
+// established for GL Accounts in reshapeAccountMaster.
+function reshapeStatementRow(row: DotnetStatementRow) {
+  return { ...row, accountType: GL_TYPE_FROM_NUMBER[row.accountType] ?? "ASSET" };
+}
+
+// Real ledger entries are tagged with the shared EnterpriseBase.Accounting.
+// VoucherType enum (Sales/Purchase/Payment/Receipt/Journal/...), not
+// SiteLedger's own SALE/PURCHASE/VOUCHER/JOURNAL_VOUCHER union — Payment and
+// Receipt (SiteLedger's two site-voucher types) both collapse to "VOUCHER".
+const SOURCE_TYPE_FROM_VOUCHER_TYPE: Record<string, string> = {
+  Sales: "SALE",
+  Purchase: "PURCHASE",
+  Payment: "VOUCHER",
+  Receipt: "VOUCHER",
+  Journal: "JOURNAL_VOUCHER",
+};
+
+interface DotnetAccountLedgerRow {
+  id: string;
+  date: string;
+  sourceType: string;
+  particulars: string | null;
+  side: string;
+  amount: number;
+}
+
+function reshapeAccountLedgerRow(row: DotnetAccountLedgerRow) {
+  return { ...row, sourceType: SOURCE_TYPE_FROM_VOUCHER_TYPE[row.sourceType] ?? "VOUCHER" };
+}
+
+interface DotnetOutstandingRow {
+  id: string;
+  date: string;
+  partyName: string | null;
+  amount: number;
+  amountPaid: number;
+  balanceDue: number;
+}
+
+async function handleReports<T>(method: string, path: string): Promise<T> {
+  if (method !== "GET") throw new Error(`No .NET route for ${method} ${path}`);
+
+  const [bare, query] = path.split("?");
+  const tail = bare === "/reports" ? "" : bare.slice("/reports".length + 1);
+  const params = new URLSearchParams(query ?? "");
+  const siteId = params.get("siteId") ?? "";
+
+  if (tail === "sales") {
+    const qs = new URLSearchParams({ SiteId: siteId });
+    if (params.get("from")) qs.set("From", params.get("from")!);
+    if (params.get("to")) qs.set("To", params.get("to")!);
+    if (params.get("customerId")) qs.set("CustomerId", params.get("customerId")!);
+    if (params.get("status")) qs.set("Status", params.get("status")!);
+    const rows = await dotnetRequest<DotnetTxnDto[]>(`/services/app/SiteLedgerReport/GetSalesRegister?${qs}`);
+    return rows.map((r) => reshapeTxn(r, "customer", "customerId", "customerName")) as T;
+  }
+
+  if (tail === "purchases") {
+    const qs = new URLSearchParams({ SiteId: siteId });
+    if (params.get("from")) qs.set("From", params.get("from")!);
+    if (params.get("to")) qs.set("To", params.get("to")!);
+    if (params.get("vendorId")) qs.set("VendorId", params.get("vendorId")!);
+    if (params.get("status")) qs.set("Status", params.get("status")!);
+    const rows = await dotnetRequest<DotnetTxnDto[]>(`/services/app/SiteLedgerReport/GetPurchasesRegister?${qs}`);
+    return rows.map((r) => reshapeTxn(r, "vendor", "vendorId", "vendorName")) as T;
+  }
+
+  if (tail === "outstanding") {
+    const result = await dotnetRequest<{
+      sales: DotnetOutstandingRow[];
+      purchases: DotnetOutstandingRow[];
+      salesSummary: unknown[];
+      purchasesSummary: unknown[];
+    }>(`/services/app/SiteLedgerReport/GetOutstanding?SiteId=${siteId}`);
+    return {
+      sales: result.sales.map((r) => ({ ...r, customer: { name: r.partyName } })),
+      purchases: result.purchases.map((r) => ({ ...r, vendor: { name: r.partyName } })),
+      salesSummary: result.salesSummary,
+      purchasesSummary: result.purchasesSummary,
+    } as T;
+  }
+
+  if (tail === "trial-balance") {
+    const rows = await dotnetRequest<DotnetStatementRow[]>(`/services/app/SiteLedgerReport/GetTrialBalance?SiteId=${siteId}`);
+    return rows.map(reshapeStatementRow) as T;
+  }
+
+  if (tail === "profit-and-loss") {
+    const qs = new URLSearchParams({ SiteId: siteId });
+    if (params.get("from")) qs.set("From", params.get("from")!);
+    if (params.get("to")) qs.set("To", params.get("to")!);
+    const result = await dotnetRequest<{ rows: DotnetStatementRow[]; totalIncome: number; totalExpense: number; netProfit: number }>(
+      `/services/app/SiteLedgerReport/GetProfitAndLoss?${qs}`,
+    );
+    return { ...result, rows: result.rows.map(reshapeStatementRow) } as T;
+  }
+
+  if (tail === "balance-sheet") {
+    const qs = new URLSearchParams({ SiteId: siteId });
+    // The page's single date field is called "asOf"; the backend's
+    // equivalent field on every other cumulative-as-of report is just `To`.
+    if (params.get("asOf")) qs.set("To", params.get("asOf")!);
+    const result = await dotnetRequest<{ rows: DotnetStatementRow[]; totalAssets: number; totalLiabilities: number; totalEquity: number }>(
+      `/services/app/SiteLedgerReport/GetBalanceSheet?${qs}`,
+    );
+    return { ...result, rows: result.rows.map(reshapeStatementRow) } as T;
+  }
+
+  if (tail === "gl-summary") {
+    const rows = await dotnetRequest<Array<{ accountId: string; accountName: string; accountType: number | null; debit: number; credit: number; net: number }>>(
+      `/services/app/SiteLedgerReport/GetGlSummary?SiteId=${siteId}`,
+    );
+    return rows.map((r) => ({ ...r, accountType: r.accountType != null ? GL_TYPE_FROM_NUMBER[r.accountType] ?? null : null })) as T;
+  }
+
+  if (tail === "balance-trend") {
+    return dotnetRequest<T>(`/services/app/SiteLedgerReport/GetBalanceTrend?SiteId=${siteId}`);
+  }
+
+  if (tail === "account-ledger") {
+    const qs = new URLSearchParams({ SiteId: siteId, AccountId: params.get("accountId") ?? "" });
+    if (params.get("from")) qs.set("From", params.get("from")!);
+    if (params.get("to")) qs.set("To", params.get("to")!);
+    const rows = await dotnetRequest<DotnetAccountLedgerRow[]>(`/services/app/SiteLedgerReport/GetAccountLedger?${qs}`);
+    return rows.map(reshapeAccountLedgerRow) as T;
+  }
+
+  throw new Error(`No .NET route for ${method} ${path}`);
+}
+
 // --- Dispatch --------------------------------------------------------------
 
 function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
@@ -706,6 +866,7 @@ function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
   if (matches(path, "/vouchers")) return handleVouchers<T>(method, path, body);
   if (matches(path, "/journal-vouchers")) return handleJournalVouchers<T>(method, path, body);
   if (matches(path, "/users")) return handleUsers<T>(method, path, body);
+  if (matches(path, "/reports")) return handleReports<T>(method, path);
   throw new Error(`No .NET handler registered for ${method} ${path}`);
 }
 

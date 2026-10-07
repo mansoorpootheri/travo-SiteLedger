@@ -3,13 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { useSiteSelection } from "@/lib/site-context";
-import { GL_ACCOUNT_GROUP_LABELS, type GLAccountGroup, type GLAccountType } from "@/lib/types";
+import type { GLAccountType } from "@/lib/types";
 
 interface TrialBalanceRow {
   accountId: string;
   accountName: string;
   accountType: GLAccountType;
-  accountGroup: GLAccountGroup | null;
+  // The tenant's real GL header name (AccountHead.Name, same as
+  // GLAccountsPage.tsx's headerName) — free-form, not the fixed legacy
+  // GLAccountGroup enum, which only covers a hardcoded set and can't
+  // represent an actual tenant's headers.
+  accountGroup: string | null;
   debit: number;
   credit: number;
   net: number;
@@ -97,7 +101,7 @@ export default function TrialBalancePage() {
                   {section.rows.map((row) => (
                     <TableRow key={row.accountId}>
                       <TableCell>{row.accountName}</TableCell>
-                      <TableCell>{row.accountGroup ? GL_ACCOUNT_GROUP_LABELS[row.accountGroup] : "—"}</TableCell>
+                      <TableCell>{row.accountGroup ?? "—"}</TableCell>
                       <TableCell>{row.net >= 0 ? row.net.toFixed(2) : ""}</TableCell>
                       <TableCell>{row.net < 0 ? (-row.net).toFixed(2) : ""}</TableCell>
                     </TableRow>

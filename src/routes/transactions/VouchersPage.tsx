@@ -11,7 +11,7 @@ import { useGlApproval } from "@/features/transactions/useGlApproval";
 import { useRowEditor } from "@/features/transactions/useRowEditor";
 import { useAppUser } from "@/routes/guards";
 import { useSiteSelection } from "@/lib/site-context";
-import { Role, TransactionStatus, VoucherType, type DaybookResponse, type Voucher } from "@/lib/types";
+import { Role, TransactionStatus, VoucherType, type VoucherListResponse } from "@/lib/types";
 
 const EMPTY_ROW = { particulars: "", bankAmount: "", cashAmount: "", narration: "" };
 
@@ -50,18 +50,15 @@ export default function VouchersPage() {
   const canEditRow = user?.role !== Role.OWNER;
   const { siteId, date } = useSiteSelection();
   const listQueryKey = ["vouchers", siteId, date];
-  const { data: vouchers, isLoading } = useQuery({
+  // Opening/closing balance for the currently-selected site+date comes back
+  // alongside the voucher list itself (plain signed sums over the Voucher
+  // table — see dotnet-shim.ts's handleVouchers) so it's visible while
+  // entering vouchers, regardless of whether today's entries are pending.
+  const { data: voucherData, isLoading } = useQuery({
     queryKey: listQueryKey,
-    queryFn: () => api.get<Voucher[]>(`/vouchers?siteId=${siteId}&date=${date}`),
+    queryFn: () => api.get<VoucherListResponse>(`/vouchers?siteId=${siteId}&date=${date}`),
   });
-  // Opening/closing balance for the currently-selected site+date — replaces
-  // the standalone Daybook page so balances are visible while entering
-  // vouchers, regardless of whether today's entries are still pending.
-  const { data: daybook } = useQuery({
-    queryKey: ["daybook", siteId, date],
-    queryFn: () => api.get<DaybookResponse>(`/daybook?siteId=${siteId}&date=${date}`),
-    enabled: !!siteId && !!date,
-  });
+  const vouchers = voucherData?.items;
 
   const { rows, setRows, results, submit, clearSavedRows } = useBatchEntry<typeof EMPTY_ROW>("/vouchers", [
     "vouchers",
@@ -104,22 +101,21 @@ export default function VouchersPage() {
   const standalone = vouchers?.filter((v) => !v.linkedTransactionId) ?? [];
 
   // Opening balance pinned as the table's first row (read-only, no
-  // trailing action) — replaces the standalone Daybook page/cards. Its
-  // amounts also feed the grid's own live column totals via
-  // `numericValues`, so the footer (relabeled "Closing Balance" below)
-  // updates in real time as rows are added/edited/typed, the same way the
-  // grid's "Total" footer always has — not a static server-computed figure
-  // that would only refresh on reload.
-  const openingBalanceRow: SavedGridRow[] = daybook
+  // trailing action). Its amounts also feed the grid's own live column
+  // totals via `numericValues`, so the footer (relabeled "Closing Balance"
+  // below) updates in real time as rows are added/edited/typed, the same
+  // way the grid's "Total" footer always has — not a static server-computed
+  // figure that would only refresh on reload.
+  const openingBalanceRow: SavedGridRow[] = voucherData
     ? [
         {
           id: "__opening_balance__",
           className: "bg-muted/40 font-medium",
-          numericValues: { bankAmount: daybook.bank.openingBalance, cashAmount: daybook.cash.openingBalance },
+          numericValues: { bankAmount: voucherData.openingBalance.bank, cashAmount: voucherData.openingBalance.cash },
           cells: {
             particulars: "Opening Balance",
-            bankAmount: daybook.bank.openingBalance.toFixed(2),
-            cashAmount: daybook.cash.openingBalance.toFixed(2),
+            bankAmount: voucherData.openingBalance.bank.toFixed(2),
+            cashAmount: voucherData.openingBalance.cash.toFixed(2),
           },
         },
       ]
@@ -257,7 +253,7 @@ export default function VouchersPage() {
         savedRowDraft={rowEditor.draft}
         onSavedRowDraftChange={rowEditor.setDraftField}
         extraFooterRow={
-          daybook
+          voucherData
             ? {
                 label: "Closing Balance",
                 spanKeys: ["bankAmount", "cashAmount"],

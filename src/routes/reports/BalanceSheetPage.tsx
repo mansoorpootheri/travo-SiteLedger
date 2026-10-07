@@ -6,13 +6,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { useSiteSelection } from "@/lib/site-context";
-import type { GLAccountGroup, GLAccountType } from "@/lib/types";
+import type { GLAccountType } from "@/lib/types";
 
 interface StatementRow {
   accountId: string;
   accountName: string;
   accountType: GLAccountType;
-  accountGroup: GLAccountGroup | null;
+  // The tenant's real GL header name (not rendered on this page, kept for
+  // shape-parity with Trial Balance's identical row type).
+  accountGroup: string | null;
   net: number;
 }
 
