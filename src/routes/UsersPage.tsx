@@ -5,6 +5,7 @@ import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -12,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Role, type AppUser, type Site } from "@/lib/types";
 
 interface AdminUserRow extends AppUser {
-  site?: { id: string; name: string } | null;
+  sites: { id: string; name: string }[];
 }
 
 export default function UsersPage() {
@@ -20,21 +21,28 @@ export default function UsersPage() {
   const { data: users, isLoading } = useQuery({ queryKey: ["users"], queryFn: () => api.get<AdminUserRow[]>("/users") });
   const { data: sites } = useQuery({ queryKey: ["master-data", "/sites"], queryFn: () => api.get<Site[]>("/sites") });
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<{ name: string; email: string; password: string; role: Role; siteId: string }>({
+  const [form, setForm] = useState<{ name: string; email: string; password: string; role: Role; siteIds: string[] }>({
     name: "",
     email: "",
     password: "",
     role: Role.ACCOUNTANT,
-    siteId: "",
+    siteIds: [],
   });
 
+  function toggleSite(siteId: string) {
+    setForm((f) => ({
+      ...f,
+      siteIds: f.siteIds.includes(siteId) ? f.siteIds.filter((id) => id !== siteId) : [...f.siteIds, siteId],
+    }));
+  }
+
   const createMutation = useMutation({
-    mutationFn: () => api.post("/users", { ...form, siteId: form.siteId || undefined }),
+    mutationFn: () => api.post("/users", form),
     onSuccess: () => {
       toast.success("User created");
       queryClient.invalidateQueries({ queryKey: ["users"] });
       setOpen(false);
-      setForm({ name: "", email: "", password: "", role: Role.ACCOUNTANT, siteId: "" });
+      setForm({ name: "", email: "", password: "", role: Role.ACCOUNTANT, siteIds: [] });
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : "Something went wrong"),
   });
@@ -106,19 +114,23 @@ export default function UsersPage() {
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label>Site</Label>
-                <Select value={form.siteId} onValueChange={(siteId) => setForm((f) => ({ ...f, siteId }))}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="No site (Owner spans all sites)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {sites?.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
+                <Label>Sites</Label>
+                <p className="text-xs text-muted-foreground">Pick one or more. None selected = Owner spans all sites.</p>
+                <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-2">
+                  {sites?.map((s) => (
+                    <div key={s.id} className="flex items-center gap-2">
+                      <Checkbox
+                        id={`site-${s.id}`}
+                        checked={form.siteIds.includes(s.id)}
+                        onCheckedChange={() => toggleSite(s.id)}
+                      />
+                      <Label htmlFor={`site-${s.id}`} className="font-normal">
                         {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                      </Label>
+                    </div>
+                  ))}
+                  {!sites?.length && <p className="text-sm text-muted-foreground">No sites yet.</p>}
+                </div>
               </div>
               <DialogFooter>
                 <Button type="submit" disabled={createMutation.isPending}>
@@ -155,7 +167,7 @@ export default function UsersPage() {
                 <TableCell>{u.name}</TableCell>
                 <TableCell>{u.email}</TableCell>
                 <TableCell>{u.role}</TableCell>
-                <TableCell>{u.site?.name ?? "—"}</TableCell>
+                <TableCell>{u.sites.length ? u.sites.map((s) => s.name).join(", ") : "—"}</TableCell>
                 <TableCell>
                   <Badge variant={u.active ? "outline" : "secondary"}>{u.active ? "Active" : "Deactivated"}</Badge>
                 </TableCell>

@@ -16,6 +16,7 @@ const DOTNET_RESOURCES = [
   "/purchases",
   "/vouchers",
   "/journal-vouchers",
+  "/users",
 ];
 
 export function isDotnetResource(path: string): boolean {
@@ -602,6 +603,95 @@ async function handleJournalVouchers<T>(method: string, path: string, body: unkn
   throw new Error(`No .NET route for ${method} ${path}`);
 }
 
+// --- Users (-> real IUserAppService/IRoleAppService) ------------------------
+// No new backend service needed — the stock ASP.NET Zero UserAppService
+// already does everything SiteLedger's /users page needs. Role names
+// ("Accountant"/"SrAccountant"/"Owner") are seeded per-SiteLedger-tenant in
+// TenantAppService.CreateAsync and must exactly match ROLE_FROM_CLAIM in
+// auth-client.ts, which decodes the same names off the JWT role claim.
+
+const ROLE_NAME_TO_FRONTEND: Record<string, string> = {
+  Admin: "ADMIN",
+  Accountant: "ACCOUNTANT",
+  SrAccountant: "SR_ACCOUNTANT",
+  Owner: "OWNER",
+};
+const ROLE_NAME_FROM_FRONTEND: Record<string, string> = {
+  ADMIN: "Admin",
+  ACCOUNTANT: "Accountant",
+  SR_ACCOUNTANT: "SrAccountant",
+  OWNER: "Owner",
+};
+
+interface DotnetUserDto {
+  id: number;
+  name: string;
+  surname: string;
+  emailAddress: string;
+  isActive: boolean;
+  roleNames: string[];
+  branchIds: number[];
+}
+
+// "Name" is single-field in SiteLedger's form but the real User requires
+// Name + Surname separately — split on the first space, falling back to
+// duplicating the whole string if there isn't one.
+function splitName(name: string): { name: string; surname: string } {
+  const idx = name.trim().indexOf(" ");
+  if (idx === -1) return { name: name.trim(), surname: name.trim() };
+  return { name: name.slice(0, idx).trim(), surname: name.slice(idx + 1).trim() };
+}
+
+async function handleUsers<T>(method: string, path: string, body: unknown): Promise<T> {
+  const id = idFromPath(path, "/users");
+
+  if (method === "GET" && !id) {
+    const [result, branches] = await Promise.all([
+      dotnetRequest<{ items: DotnetUserDto[] }>("/services/app/User/GetAll?MaxResultCount=1000"),
+      dotnetRequest<{ items: { branch: { id: number; branchName: string } }[] }>("/services/app/Branch/GetAll"),
+    ]);
+    const branchNames = new Map(branches.items.map((b) => [b.branch.id, b.branch.branchName]));
+    return result.items.map((u) => {
+      const sites = u.branchIds.map((branchId) => ({ id: String(branchId), name: branchNames.get(branchId) ?? "" }));
+      return {
+        id: String(u.id),
+        name: `${u.name} ${u.surname}`.trim(),
+        email: u.emailAddress,
+        role: ROLE_NAME_TO_FRONTEND[u.roleNames[0]] ?? "ACCOUNTANT",
+        active: u.isActive,
+        siteId: sites[0]?.id ?? null,
+        sites,
+      };
+    }) as T;
+  }
+  if (method === "POST" && !id) {
+    const input = body as { name: string; email: string; password: string; role: string; siteIds: string[] };
+    const { name, surname } = splitName(input.name);
+    const created = await dotnetRequest<DotnetUserDto>("/services/app/User/Create", {
+      method: "POST",
+      body: JSON.stringify({
+        userName: input.email,
+        name,
+        surname,
+        emailAddress: input.email,
+        password: input.password,
+        isActive: true,
+        roleNames: [ROLE_NAME_FROM_FRONTEND[input.role] ?? "Accountant"],
+        branchIds: (input.siteIds ?? []).map(Number),
+      }),
+    });
+    return { id: String(created.id), name: `${created.name} ${created.surname}`.trim(), email: created.emailAddress, active: created.isActive } as T;
+  }
+  if (method === "PATCH" && id) {
+    const input = body as { active: boolean };
+    const action = input.active ? "Activate" : "DeActivate";
+    await dotnetRequest<void>(`/services/app/User/${action}`, { method: "POST", body: JSON.stringify({ id: Number(id) }) });
+    return { id, active: input.active } as T;
+  }
+
+  throw new Error(`No .NET route for ${method} ${path}`);
+}
+
 // --- Dispatch --------------------------------------------------------------
 
 function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
@@ -615,6 +705,7 @@ function resolve<T>(method: string, path: string, body: unknown): Promise<T> {
   if (matches(path, "/purchases")) return handlePurchases<T>(method, path, body);
   if (matches(path, "/vouchers")) return handleVouchers<T>(method, path, body);
   if (matches(path, "/journal-vouchers")) return handleJournalVouchers<T>(method, path, body);
+  if (matches(path, "/users")) return handleUsers<T>(method, path, body);
   throw new Error(`No .NET handler registered for ${method} ${path}`);
 }
 
