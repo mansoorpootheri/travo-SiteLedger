@@ -57,8 +57,9 @@ export default function Login() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/30 px-4">
       <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>SiteLedger</CardTitle>
+        <CardHeader className="justify-items-center text-center">
+          <img src="/logo-horizontal.png" alt="Entry by Mazena" className="h-14 w-auto" />
+          <CardTitle className="sr-only">Entry by Mazena</CardTitle>
         </CardHeader>
         <CardContent>
           <form className="space-y-4" onSubmit={handleSubmit} autoComplete="off">

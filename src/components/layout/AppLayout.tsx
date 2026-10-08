@@ -28,7 +28,10 @@ export default function AppLayout() {
       <header className="border-b bg-background">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
           <div className="flex items-center gap-6">
-            <span className="font-semibold">SiteLedger</span>
+            <span className="flex items-center gap-2 font-semibold">
+              <img src="/icon-192.png" alt="" className="h-6 w-6 rounded-md" />
+              Entry
+            </span>
             <nav className="flex gap-1">
               {/* ADMIN sees every item, same bypass as RequireRole/requireRole. */}
               {NAV_ITEMS.filter((item) => user.role === Role.ADMIN || item.roles.includes(user.role)).map((item) => (
